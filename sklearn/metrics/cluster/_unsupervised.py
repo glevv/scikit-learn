@@ -27,7 +27,6 @@ from sklearn.utils._array_api import (
 )
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
 
-from scipy.spatial.distance import cdist
 from ._dbcv_internals import distances_between_points, internal_minimum_spanning_tree, density_separation
 
 
