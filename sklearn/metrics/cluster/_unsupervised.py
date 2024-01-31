@@ -28,9 +28,9 @@ from sklearn.utils._array_api import (
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
 
 from ._dbcv_internals import (
+    density_separation,
     distances_between_points,
     internal_minimum_spanning_tree,
-    density_separation,
 )
 
 
