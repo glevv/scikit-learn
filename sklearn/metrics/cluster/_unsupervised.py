@@ -491,7 +491,7 @@ def davies_bouldin_score(X, labels):
     return float(_average(scores, xp=xp))
 
 
-def dbcv(
+def dbcv_score(
     X,
     labels,
     metric="euclidean",
