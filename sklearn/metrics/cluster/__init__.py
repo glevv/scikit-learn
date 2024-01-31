@@ -27,7 +27,7 @@ from sklearn.metrics.cluster._supervised import (
 from sklearn.metrics.cluster._unsupervised import (
     calinski_harabasz_score,
     davies_bouldin_score,
-    dbcv,
+    dbcv_score,
     silhouette_samples,
     silhouette_score,
 )
@@ -40,7 +40,7 @@ __all__ = [
     "consensus_score",
     "contingency_matrix",
     "davies_bouldin_score",
-    "dbcv",
+    "dbcv_score",
     "expected_mutual_information",
     "fowlkes_mallows_score",
     "homogeneity_completeness_v_measure",
