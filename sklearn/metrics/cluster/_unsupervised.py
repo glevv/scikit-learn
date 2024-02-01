@@ -576,6 +576,7 @@ def dbcv_score(
     """
 
     labels = np.asarray(labels, dtype=int)
+    X, labels = check_X_y(X, labels)
     
     core_distances = {}
     density_sparseness = {}
