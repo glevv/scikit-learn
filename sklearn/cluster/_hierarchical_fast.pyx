@@ -4,7 +4,6 @@
 import numpy as np
 cimport cython
 
-from sklearn.metrics._dist_metrics cimport DistanceMetric64
 from sklearn.utils._fast_dict cimport IntFloatDict
 from sklearn.utils._typedefs cimport float64_t, intp_t, uint8_t
 
