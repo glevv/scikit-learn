@@ -29,9 +29,9 @@ from sklearn.utils._array_api import (
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
 
 from ._dbcv_internals import (
-    density_separation,
-    distances_between_points,
-    internal_minimum_spanning_tree,
+    _density_separation,
+    _distances_between_points,
+    _internal_minimum_spanning_tree,
 )
 
 
@@ -623,7 +623,7 @@ def dbcv_score(
     labels_to_scores = {}
 
     for encoding_index in encoding_cluster_indices:
-        distances_for_mst, core_distances[encoding_index] = distances_between_points(
+        distances_for_mst, core_distances[encoding_index] = _distances_between_points(
             X,
             labels,
             encoding_index,
@@ -635,7 +635,7 @@ def dbcv_score(
         )
 
         mst_nodes[encoding_index], mst_edges[encoding_index] = (
-            internal_minimum_spanning_tree(distances_for_mst)
+            _internal_minimum_spanning_tree(distances_for_mst)
         )
         density_sparseness[encoding_index] = mst_edges[encoding_index].T[2].max()
 
@@ -645,7 +645,7 @@ def dbcv_score(
             encoding_cluster_indices.index(encoding_index) + 1 :
         ]:
             internal_nodes_j = mst_nodes[j]
-            density_sep[encoding_index, j] = density_separation(
+            density_sep[encoding_index, j] = _density_separation(
                 X,
                 labels,
                 encoding_index,
