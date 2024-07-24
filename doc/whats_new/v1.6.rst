@@ -567,6 +567,11 @@ Python and CPython ecosystem, for example :user:`Nathan Goldbaum <ngoldbaum>`,
   removed in 1.8. In the meantime, `None` is equivalent to `"predict"`.
   By :user:`Jérémie du Boisberranger <jeremiedb>` :pr:`30001`
 
+- |Feature| :pr:`28244` by :user:`Luis Görler <luis261>`
+  introduces a new unsupervised clustering validity metric,
+  suitable for optimizing density based clustering algorithms,
+  such as DBSCAN etc: :func:`metrics.cluster.dbcv_score`
+
 :mod:`sklearn.model_selection`
 ------------------------------
 
