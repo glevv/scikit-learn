@@ -427,13 +427,11 @@ def _write_estimator_html(
 
         out.write("</div>")
     elif est_block.kind == "single":
-        if (
-            has_feature_names_out
-            and is_not_pipeline_step
-            and is_fitted_css_class
-            and hasattr(estimator, "n_features_in_")
-        ):
-            output_features = estimator.get_feature_names_out()
+        if has_feature_names_out and is_not_pipeline_step and is_fitted_css_class:
+            try:
+                output_features = estimator.get_feature_names_out()
+            except Exception:
+                output_features = ""
         else:
             output_features = ""
 
