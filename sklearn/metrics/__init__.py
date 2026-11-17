@@ -68,14 +68,20 @@ from sklearn.metrics._regression import (
     root_mean_squared_error,
     root_mean_squared_log_error,
 )
-from ._scorer import check_scoring, get_scorer, get_scorer_names, make_scorer
-from .cluster import (
+from sklearn.metrics._scorer import (
+    check_scoring,
+    get_scorer,
+    get_scorer_names,
+    make_scorer,
+)
+from sklearn.metrics.cluster import (
     adjusted_mutual_info_score,
     adjusted_rand_score,
     calinski_harabasz_score,
     completeness_score,
     consensus_score,
     davies_bouldin_score,
+    dbcv_score,
     fowlkes_mallows_score,
     homogeneity_completeness_v_measure,
     homogeneity_score,
@@ -87,7 +93,7 @@ from .cluster import (
     silhouette_score,
     v_measure_score,
 )
-from .pairwise import (
+from sklearn.metrics.pairwise import (
     euclidean_distances,
     nan_euclidean_distances,
     pairwise_distances,
@@ -128,6 +134,7 @@ __all__ = [
     "d2_pinball_score",
     "d2_tweedie_score",
     "davies_bouldin_score",
+    "dbcv_score",
     "dcg_score",
     "det_curve",
     "euclidean_distances",

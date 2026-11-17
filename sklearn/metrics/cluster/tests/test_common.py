@@ -173,9 +173,9 @@ def test_format_invariance(metric_name):
             np.array([str(x) + "-a" for x in y.tolist()], dtype=object),
             "array of strs",
         )
-        # workaround: shift values of `-1` to avoid failures for density based metrics
-        # which may intentionally not uphold format invariance for noise points
-        yield [x - 2 if x != 1 else x - 100 for x in y], "including negative ints"
+        # shifted enough to steer clear of -1: density based metrics read it as
+        # the label of noise
+        yield y - 3, "including negative ints"
         yield y + 1, "strictly positive ints"
 
     if metric_name in SUPERVISED_METRICS:

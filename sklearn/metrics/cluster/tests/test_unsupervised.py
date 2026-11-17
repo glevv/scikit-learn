@@ -1,5 +1,6 @@
 import warnings
-from unittest.mock import patch
+from collections import Counter
+from itertools import combinations
 
 import numpy as np
 import pytest
@@ -400,14 +401,11 @@ def test_davies_bouldin_score():
 
 @pytest.fixture
 def density_sample():
-    points, labels = datasets.make_moons()
-    bounds = np.array([np.max(points, axis=0), np.min(points, axis=0)]).transpose()
-    noise = [
-        [np.random.uniform(*bounds[0]), np.random.uniform(*bounds[1])]
-        for _ in range(10)
-    ]
+    rng = np.random.RandomState(0)
+    points, labels = datasets.make_moons(random_state=0)
+    noise = rng.uniform(points.min(axis=0), points.max(axis=0), size=(10, 2))
     points = np.append(points, noise, axis=0)
-    labels = np.append(labels, [-1 for _ in range(10)])
+    labels = np.append(labels, np.full(10, -1))
     return points, labels
 
 
@@ -418,6 +416,83 @@ def density_samples_good_bad():
     # (shuffled samples are labeled based on index mod 2)
     bad = single_gauss_blob, [i % 2 for i in range(single_gauss_blob.shape[0])]
     return datasets.make_moons(random_state=42), bad
+
+
+def _naive_dbcv_score(X, labels, mst_raw_dist=False):
+    """Straightforward transcription of the definitions of the DBCV paper."""
+    n_samples, n_features = X.shape
+    distances = pairwise_distances(X)
+    core_distances = np.zeros(n_samples)
+    internal_nodes, sparseness = {}, {}
+
+    def reachability(a, b):
+        return max(distances[a, b], core_distances[a], core_distances[b])
+
+    for label in np.unique(labels[labels != -1]):
+        members = np.flatnonzero(labels == label)
+        if not mst_raw_dist:
+            for o in members:
+                others = members[members != o]
+                core_distances[o] = np.mean(
+                    (1 / distances[o, others]) ** n_features
+                ) ** (-1 / n_features)
+
+        # Kruskal's algorithm, the lightest edges first and the shortest ones
+        # first among the edges of equal weight.
+        edges = sorted(
+            (reachability(a, b), distances[a, b], a, b)
+            for a, b in combinations(members, 2)
+        )
+        component = {node: node for node in members}
+        mst = []
+        for weight, _, a, b in edges:
+            if component[a] != component[b]:
+                mst.append((weight, a, b))
+                merged = component[b]
+                for node in members:
+                    if component[node] == merged:
+                        component[node] = component[a]
+
+        degrees = Counter(node for _, a, b in mst for node in (a, b))
+        internal_nodes[label] = [node for node in members if degrees[node] > 1]
+        sparseness[label] = max(
+            weight for weight, a, b in mst if degrees[a] > 1 and degrees[b] > 1
+        )
+
+    score = 0
+    for label, nodes in internal_nodes.items():
+        separation = min(
+            reachability(a, b)
+            for other_label, other_nodes in internal_nodes.items()
+            if other_label != label
+            for a in nodes
+            for b in other_nodes
+        )
+        validity = (separation - sparseness[label]) / max(separation, sparseness[label])
+        score += validity * np.sum(labels == label) / n_samples
+    return score
+
+
+@pytest.mark.parametrize("mst_raw_dist", [False, True])
+@pytest.mark.parametrize("n_features", [2, 5])
+def test_dbcv_score_against_naive_implementation(
+    mst_raw_dist, n_features, global_random_seed
+):
+    rng = np.random.RandomState(global_random_seed)
+    X, labels = datasets.make_blobs(
+        n_samples=80,
+        centers=4,
+        n_features=n_features,
+        random_state=global_random_seed,
+    )
+    # mislabel some samples and flag a few others as noise
+    labels[rng.choice(80, size=10, replace=False)] = rng.randint(4, size=10)
+    labels[rng.choice(80, size=8, replace=False)] = -1
+
+    assert_allclose(
+        dbcv_score(X, labels, mst_raw_dist=mst_raw_dist),
+        _naive_dbcv_score(X, labels, mst_raw_dist=mst_raw_dist),
+    )
 
 
 def test_dbcv_score_basic_validation_errs():
@@ -433,6 +508,13 @@ def test_dbcv_score_precomputed_missing_d_valerr(density_sample):
             density_sample[1],
             metric="precomputed",
         )
+
+
+def test_dbcv_score_precomputed_not_square():
+    rng = np.random.RandomState(0)
+    msg = "X must be a square distance matrix"
+    with pytest.raises(ValueError, match=msg):
+        dbcv_score(rng.rand(6, 3), [0, 0, 0, 1, 1, 1], metric="precomputed", d=2)
 
 
 def test_dbcv_score_irrelevant_d_warning(density_sample):
@@ -492,28 +574,35 @@ def test_dbcv_score_basic_input(density_sample):
     assert res[0] < dbcv_score(*sample_without_noise)
 
 
+def test_dbcv_score_per_cluster_scores(density_sample):
+    X, labels = density_sample
+    score, per_cluster = dbcv_score(X, labels, per_cluster_scores=True)
+
+    assert set(per_cluster) == {0, 1}
+    assert all(-1 <= value <= 1 for value in per_cluster.values())
+    # the overall score is the average of the scores of the clusters, weighted
+    # by their share of the samples, noise included
+    weighted = sum(np.mean(labels == k) * value for k, value in per_cluster.items())
+    assert score == pytest.approx(weighted)
+
+
 def test_dbcv_score_zero_distance_intra():
     # DBCV is undefined if any all-points-core-distances are undefined
     # due to identical points, thus raising an error
-    with pytest.raises(ValueError) as exc_info:
-        dbcv_score(
-            [[1, 1] if i % 2 else [0, 0] for i in range(100)],
-            [i % 2 for i in range(100)],
-        )
-    assert exc_info.value.args[0].startswith(
-        "Identified duplicated points in a cluster."
-    )
+    X = [[1, 1] if i % 2 else [0, 0] for i in range(100)]
+    labels = [i % 2 for i in range(100)]
+    with pytest.raises(ValueError, match="Identified duplicated points in a cluster"):
+        dbcv_score(X, labels)
 
     # Identical points should NOT affect DBCV in its non-default configuration, with
     # the `mst_raw_dist` toggle activated, which directly uses "raw" distances and
     # as such avoids the use of all-points-core-distances entirely
-    dbcv_score(
-        [[1, 1] if i % 2 else [0, 0] for i in range(100)],
-        [i % 2 for i in range(100)],
-        mst_raw_dist=True,
-    )
+    # (the MST of a set of identical points has no internal edges)
+    with pytest.warns(UserWarning, match="no internal edges"):
+        assert dbcv_score(X, labels, mst_raw_dist=True) == pytest.approx(1)
 
 
+@pytest.mark.filterwarnings("ignore:The minimum spanning tree has no internal edges")
 def test_dbcv_score_zero_distance_inter():
     expected_msg = (
         "Aborting aggregation of scores of subcomponents: "
@@ -531,45 +620,127 @@ def test_dbcv_score_zero_distance_inter():
         )
 
 
-def test_dbcv_score_tiny_cluster():
-    dbcv_score(np.random.rand(5, 2), np.array([-1, 1, 1, 0, 0]))
-    dbcv_score(
-        np.random.rand(5, 2),
-        np.array([-1, 1, 1, 0, 0]),
-        strict_cluster_size_validation=True,
-    )
+@pytest.mark.parametrize("mst_raw_dist", [False, True])
+def test_dbcv_score_tiny_cluster(mst_raw_dist):
+    rng = np.random.RandomState(0)
+
+    # clusters of two samples have no internal edges
+    with pytest.warns(UserWarning, match="no internal edges"):
+        score = dbcv_score(
+            rng.rand(5, 2), np.array([-1, 1, 1, 0, 0]), mst_raw_dist=mst_raw_dist
+        )
+    assert -1 <= score <= 1
+
     expected_msg = "DBCV is not defined for clusters of size 1."
     with pytest.raises(ValueError, match=expected_msg):
-        dbcv_score(
-            np.random.rand(3, 2),
-            np.array([1, 1, 0]),
-            strict_cluster_size_validation=True,
-        )
+        dbcv_score(rng.rand(5, 2), np.array([1, 1, 0, 2, 2]), mst_raw_dist=mst_raw_dist)
 
 
-def test_dbcv_score_verbose(density_sample):
-    with patch("builtins.print") as mocked_print:
-        dbcv_score(*density_sample, verbose=True)
-        mocked_print.assert_called()
+@pytest.mark.filterwarnings("ignore:The minimum spanning tree has no internal edges")
+@pytest.mark.parametrize("mst_raw_dist", [False, True])
+def test_dbcv_score_sample_order_invariance(mst_raw_dist, global_random_seed):
+    # Non-regression test: clusters without any internal node used to be
+    # represented by their first sample only, and the ties between mutual
+    # reachability distances used to be settled by the order of the samples.
+    rng = np.random.RandomState(global_random_seed)
+    X = rng.rand(72, 2)
+    # clusters of all sizes, down to two samples
+    labels = np.repeat(np.arange(6), [2, 2, 3, 5, 20, 40])
+    # blend the two largest clusters
+    labels[12:] = rng.permutation(labels[12:])
+    permutation = rng.permutation(72)
 
-
-def test_dbcv_score_precomputed_input(density_sample):
-    # score should at least be non-negative if labeled by ground-truth
-    assert (
-        dbcv_score(
-            pairwise_distances(density_sample[0]),
-            density_sample[1],
-            metric="precomputed",
-            d=2,
-        )
-        >= 0
+    assert_allclose(
+        dbcv_score(X, labels, mst_raw_dist=mst_raw_dist),
+        dbcv_score(X[permutation], labels[permutation], mst_raw_dist=mst_raw_dist),
     )
+
+
+def test_dbcv_score_verbose(density_sample, capsys):
+    dbcv_score(*density_sample, verbose=True)
+    captured = capsys.readouterr().out
+    assert "Max raw distance to coredistance ratio" in captured
+    assert "Minimum density separation" in captured
+    assert "Density sparseness" in captured
+
+
+@pytest.mark.parametrize("mst_raw_dist", [False, True])
+def test_dbcv_score_precomputed_input(density_sample, mst_raw_dist):
+    X, labels = density_sample
+    expected = dbcv_score(X, labels, mst_raw_dist=mst_raw_dist)
+    distances = pairwise_distances(X)
+
+    # `d` may be any integral type
+    for d in (2, np.int64(2)):
+        score = dbcv_score(
+            distances, labels, metric="precomputed", d=d, mst_raw_dist=mst_raw_dist
+        )
+        assert score == pytest.approx(expected)
+
+    # neither the input nor its memory layout matter
+    score = dbcv_score(
+        np.asfortranarray(distances),
+        labels,
+        metric="precomputed",
+        d=2,
+        mst_raw_dist=mst_raw_dist,
+    )
+    assert score == pytest.approx(expected)
+    assert_array_equal(distances, pairwise_distances(X))
+
+
+def test_dbcv_score_precomputed_raw_dist_does_not_need_d(density_sample):
+    X, labels = density_sample
+    assert dbcv_score(
+        pairwise_distances(X), labels, metric="precomputed", mst_raw_dist=True
+    ) == pytest.approx(dbcv_score(X, labels, mst_raw_dist=True))
 
 
 def test_dbcv_score_mst_raw_dist(density_sample):
     # should be non-negative if labeled by ground-truth, regardless
     # (or arguably especially in the case) of non-MRD MST's
     assert dbcv_score(*density_sample, mst_raw_dist=True) >= 0
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int64])
+def test_dbcv_score_dtypes(dtype):
+    # Non-regression test: anything but C-contiguous float64 data used to fail
+    X, labels = datasets.make_blobs(n_samples=60, centers=3, random_state=0)
+    X = (X * 100).round()
+    assert dbcv_score(X.astype(dtype), labels) == pytest.approx(
+        dbcv_score(X, labels), rel=1e-4
+    )
+
+    distances = pairwise_distances(X).round() + 1 - np.eye(60)
+    assert dbcv_score(
+        distances.astype(dtype), labels, metric="precomputed", d=2
+    ) == pytest.approx(dbcv_score(distances, labels, metric="precomputed", d=2))
+
+
+@pytest.mark.parametrize("scale", [1e-3, 1, 1e3])
+def test_dbcv_score_high_dimension(scale):
+    # Non-regression test: raising distances to the power of `n_features` used
+    # to overflow or underflow, the core distances are computed in log-space.
+    X, labels = datasets.make_blobs(
+        n_samples=90, centers=3, n_features=1000, random_state=0
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        score = dbcv_score(X * scale, labels)
+
+    # the score does not depend on the scale of the data
+    assert score == pytest.approx(dbcv_score(X, labels))
+    assert score > 0.5
+
+
+def test_dbcv_score_string_labels(density_sample):
+    X, labels = density_sample
+    names = np.array(["noise", "a", "b"], dtype=object)[labels + 1]
+    names[labels == -1] = "-1"
+    score, per_cluster = dbcv_score(X, names, per_cluster_scores=True)
+
+    assert score == dbcv_score(X, labels)
+    assert set(per_cluster) == {"a", "b"}
 
 
 def test_silhouette_score_integer_precomputed():

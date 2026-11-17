@@ -1,0 +1,6 @@
+- :func:`metrics.dbcv_score` is a new unsupervised clustering metric, the
+  Density-Based Clustering Validation index. Contrary to the other unsupervised
+  metrics, it does not assume clusters to be convex and it accounts for noise,
+  which makes it suitable for evaluating density-based clusterings such as the
+  ones of :class:`cluster.HDBSCAN`.
+  By :user:`Luis Görler <luis261>`.

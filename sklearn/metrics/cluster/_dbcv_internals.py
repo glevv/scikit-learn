@@ -1,311 +1,56 @@
+"""Building blocks of the DBCV (Density-Based Clustering Validation) index.
+
+The quantities computed here follow the definitions of [1]_.
+
+References
+----------
+.. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
+   2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
+   <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
+"""
+
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
-
 
 import warnings
 
 import numpy as np
+from scipy.special import logsumexp
 
-from ..pairwise import pairwise_distances
 
+def _all_points_core_distances(distances, n_features):
+    """Compute the all-points-core-distance of every point of a cluster.
 
-def _density_separation(
-    X,
-    labels,
-    cluster_id1,
-    cluster_id2,
-    internal_nodes1,
-    internal_nodes2,
-    core_distances1,
-    core_distances2,
-    metric="euclidean",
-    no_coredist=False,
-    **kwd_args,
-):
-    """
-    Compute the density separation between two clusters. This is the minimum
-    distance between pairs of points belonging to the internal nodes of the MSTs
-    of each cluster.
+    For a point `o` of a cluster of `n` points embedded in `n_features`
+    dimensions, it is defined as (Definition 1 of [1]_)::
+
+        (sum_{p != o} (1 / dist(o, p)) ** n_features / (n - 1)) ** (-1 / n_features)
+
+    The computation is carried out in log-space: evaluating the powers directly
+    overflows or underflows as soon as `n_features` gets large.
 
     Parameters
     ----------
-    X : array (n_samples, n_features) or (n_samples, n_samples)
-        The input data of the clustering. This can be the data, or, if the
-        metric is set to `precomputed`, the pairwise distance matrix used
-        for the clustering.
+    distances : ndarray of shape (cluster_size, cluster_size), dtype=float64
+        Pairwise distances between the points of the cluster. The diagonal is
+        ignored.
 
-    labels : array (n_samples)
-        The label array output by the clustering, providing an integral
-        cluster label to each data point, with -1 for noise points.
-
-    cluster_id1 : int
-        The first cluster label for which to compute the separation.
-
-    cluster_id2 : int
-        The second cluster label for which to compute the separation.
-
-    internal_nodes1 : array
-        The vertices of the MST for `cluster_id1` that are the internal vertices.
-
-    internal_nodes2 : array
-        The vertices of the MST for `cluster_id2` that are the internal vertices.
-
-    core_distances1 : array (size of cluster_id1,)
-        The all-points-core_distances of all points in the cluster
-        specified by cluster_id1.
-
-    core_distances2 : array (size of cluster_id2,)
-        The all-points-core_distances of all points in the cluster
-        specified by cluster_id2.
-
-    metric : str or callable, default='euclidean'
-        The metric used to compute distances for the clustering (and
-        to be re-used in computing distances for mr distance). If
-        set to `precomputed` then X is assumed to be the precomputed
-        distance matrix between samples.
-
-    no_coredist : bool, default=False
-        If set to True, ignore core distances, work with
-        "raw" distances instead.
-
-    **kwd_args :
-        Extra arguments to pass to the distance computation for other
-        metrics, such as minkowski, mahanalobis etc.
+    n_features : int
+        Dimension of the space the points live in.
 
     Returns
     -------
-    The 'density separation' between the clusters specified by
-    `cluster_id1` and `cluster_id2`.
-
-    References
-    ----------
-    .. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
-    2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
-    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
+    core_distances : ndarray of shape (cluster_size,)
+        The all-points-core-distance of each point of the cluster.
     """
-    if metric == "precomputed":
-        X_subset = X[labels == cluster_id1, :][:, labels == cluster_id2]
-        distance_matrix = X_subset[internal_nodes1, :][:, internal_nodes2]
-    else:
-        cluster1 = X[labels == cluster_id1][internal_nodes1]
-        cluster2 = X[labels == cluster_id2][internal_nodes2]
-        distance_matrix = pairwise_distances(cluster1, cluster2, metric, **kwd_args)
+    n_samples = distances.shape[0]
+    with np.errstate(divide="ignore"):
+        log_distances = np.log(distances)
+    # A point is not its own neighbor: exp(-n_features * inf) = 0 leaves the
+    # diagonal out of the sum below.
+    np.fill_diagonal(log_distances, np.inf)
 
-    if no_coredist:
-        return distance_matrix.min()
-
-    else:
-        core_dist_matrix1 = np.tile(
-            core_distances1[internal_nodes1], (distance_matrix.shape[1], 1)
-        ).T
-        core_dist_matrix2 = np.tile(
-            core_distances2[internal_nodes2], (distance_matrix.shape[0], 1)
-        )
-
-        mr_dist_matrix = np.dstack(
-            [distance_matrix, core_dist_matrix1, core_dist_matrix2]
-        ).max(axis=-1)
-
-        return mr_dist_matrix.min()
-
-
-def _internal_minimum_spanning_tree(mr_distances):
-    """
-    Compute the 'internal' minimum spanning tree given an array of mutual
-    reachability distances. Given a minimum spanning tree the 'internal'
-    graph is the subgraph induced by vertices of degree greater than one.
-
-    Parameters
-    ----------
-    mr_distances : array (cluster_size, cluster_size)
-        The pairwise mutual reachability distances, inferred to be the edge
-        weights of a complete graph. Since MSTs are computed per cluster
-        this is the all-points-mutual-reachability for points within a single
-        cluster.
-
-    Returns
-    -------
-    internal_nodes : array
-        An array listing the indices of the internal nodes of the MST.
-
-    internal_edges : array (?, 3)
-        An array of internal edges in weighted edge list format; that is
-        an edge is an array of length three listing the two vertices
-        forming the edge and weight of the edge.
-
-    References
-    ----------
-    .. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
-    2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
-    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
-    """
-    from ...cluster._hierarchical_fast import mst_linkage_core
-
-    min_span_tree = mst_linkage_core(mr_distances, None, precomputed=True)
-    # mark internal nodes via converting the occurence count to bool
-    internal_node_indices = np.arange(mr_distances.shape[0])[
-        np.bincount(min_span_tree.T[:2].flatten().astype(np.intp)) > 1
-    ]
-    if len(internal_node_indices) == 0:
-        internal_node_indices = [0]
-    # A little "fancy" as we select from the flattened array, reshape back
-    # (Fortran format to get the indexing right) and take the product to do
-    # an `and` operation and then convert back to a boolean type.
-    edge_selection = np.prod(
-        np.isin(min_span_tree.T[:2], internal_node_indices).reshape(
-            (min_span_tree.shape[0], 2), order="F"
-        ),
-        axis=1,
-    ).astype(bool)
-
-    # Density sparseness is not well defined if there are no
-    # internal edges (as per the referenced paper). However
-    # MATLAB code from the original authors simply selects the
-    # largest of *all* the edges in the case that there are
-    # no internal edges, so we do the same here.
-    if np.any(edge_selection):
-        # If there are any internal edges, then subselect them out
-        edges = min_span_tree[edge_selection]
-    else:
-        # If there are no internal edges then we want to take the
-        # max over all the edges that exist in the MST, so we simply
-        # do nothing and return all the edges in the MST.
-        msg = (
-            "The minimum spanning tree has no internal edges: "
-            "falling back on implementation-specific behavior "
-            "by skipping edge selection."
-        )
-        warnings.warn(msg, UserWarning)
-        edges = min_span_tree.copy()
-
-    return internal_node_indices, edges
-
-
-def _distances_between_points(
-    X,
-    labels,
-    cluster_id,
-    metric="euclidean",
-    d=None,
-    no_coredist=False,
-    print_max_raw_to_coredist_ratio=False,
-    **kwd_args,
-):
-    """
-    Compute pairwise distances for all the points of a cluster.
-
-    If metric is 'precomputed' then assume X is a distance matrix for the full
-    dataset. Note that in this case you must pass in 'd' the dimension of the
-    dataset.
-
-    Parameters
-    ----------
-    X : array (n_samples, n_features) or (n_samples, n_samples)
-        The input data of the clustering. This can be the data, or, if
-        metric is set to `precomputed`, the pairwise distance matrix used
-        for the clustering.
-
-    labels : array (n_samples)
-        The label array output by the clustering, providing an integral
-        cluster label to each data point, with -1 for noise points.
-
-    cluster_id : int
-        The cluster label for which to compute the distances.
-
-    metric : str or callable, default='euclidean'
-        The metric used to compute distances for the clustering (and
-        to be re-used in computing distances for mr distance). If
-        set to `precomputed` then X is assumed to be the precomputed
-        distance matrix between samples.
-
-    d : int (or None)
-        The number of features (dimension) of the dataset. This need only
-        be set in the case of metric being set to `precomputed`, where
-        the ambient dimension of the data is unknown to the function.
-
-    no_coredist : bool, default=False
-        If set to True, skip core distance calculcations, work with
-        "raw" distances instead.
-
-    **kwd_args :
-        Extra arguments to pass to the distance computation for other
-        metrics, such as minkowski, mahanalobis etc.
-
-    Returns
-    -------
-
-    distances : array (n_samples, n_samples)
-        The distances between all points in `X` with `label` equal to `cluster_id`.
-
-    core_distances : array (n_samples,)
-        The all-points-core_distance of all points in `X` with `label` equal
-        to `cluster_id`.
-
-    References
-    ----------
-    .. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
-    2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
-    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
-    """
-    if metric == "precomputed":
-        if d is None:
-            raise ValueError("If metric is precomputed a d value must be provided!")
-        distance_matrix = X[labels == cluster_id, :][:, labels == cluster_id]
-    else:
-        subset_X = X[labels == cluster_id, :]
-        distance_matrix = pairwise_distances(subset_X, metric=metric, **kwd_args)
-        if d is not None:
-            msg = (
-                'The "d" value you provided is being ignored. '
-                "It's only required for precomputed distances."
-            )
-            warnings.warn(msg, UserWarning)
-        d = X.shape[1]
-
-    if no_coredist:
-        return distance_matrix, None
-
-    core_distances = _all_points_core_distance(distance_matrix.copy(), d=d)
-    core_dist_matrix = np.tile(core_distances, (core_distances.shape[0], 1))
-    stacked_distances = np.dstack(
-        [distance_matrix, core_dist_matrix, core_dist_matrix.T]
-    )
-
-    if print_max_raw_to_coredist_ratio:
-        print(
-            "Max raw distance to coredistance ratio: "
-            + str(_max_ratio(stacked_distances))
-        )
-
-    return stacked_distances.max(axis=-1), core_distances
-
-
-def _all_points_core_distance(distance_matrix, d=2):
-    """
-    Compute the all-points-core-distance for all the points of a cluster.
-
-    Parameters
-    ----------
-    distance_matrix : array (cluster_size, cluster_size)
-        The pairwise distance matrix between points in the cluster.
-
-    d : int
-        The dimension of the data set, which is used in the computation
-        of the all-point-core-distance as per the referenced paper.
-
-    Returns
-    -------
-    core_distances : array (cluster_size,)
-        The all-points-core-distance of each point in the cluster.
-
-    References
-    ----------
-    .. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
-    2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
-    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
-    """
-    non_diagonal_indices = ~np.eye(*distance_matrix.shape, dtype=bool)
-    if distance_matrix[non_diagonal_indices].min() == 0.0:
+    if np.isneginf(log_distances).any():
         raise ValueError(
             "Identified duplicated points in a cluster. Such points cause their "
             "all-points-core-distances to be undefined, in turn affecting the whole "
@@ -315,14 +60,150 @@ def _all_points_core_distance(distance_matrix, d=2):
             "core distances altogether.)"
         )
 
-    distance_matrix[non_diagonal_indices] = (
-        1.0 / distance_matrix[non_diagonal_indices]
-    ) ** d
-    result = distance_matrix.sum(axis=1) / (distance_matrix.shape[0] - 1)
-    return result ** (-1 / d)
+    log_distances *= -n_features
+    log_mean = logsumexp(log_distances, axis=1) - np.log(n_samples - 1)
+    return np.exp(-log_mean / n_features)
 
 
-def _max_ratio(stacked_distances):
-    raw_dist, core_dist, _ = np.moveaxis(stacked_distances, -1, 0)
-    ratios = np.zeros_like(raw_dist)
-    return np.divide(core_dist, raw_dist, out=ratios, where=(raw_dist != 0)).max()
+def _mutual_reachability(distances, core_distances_rows, core_distances_cols):
+    """Compute mutual reachability distances out of distances and core distances."""
+    reachability = np.maximum(distances, core_distances_rows[:, np.newaxis])
+    np.maximum(reachability, core_distances_cols[np.newaxis, :], out=reachability)
+    return reachability
+
+
+def _max_core_to_raw_distance_ratio(distances, core_distances):
+    """Largest ratio between a core distance and a raw distance of a cluster."""
+    ratios = np.zeros_like(distances)
+    np.divide(core_distances[np.newaxis, :], distances, out=ratios, where=distances > 0)
+    return ratios.max()
+
+
+def _minimum_spanning_tree(distances, tie_breaker=None):
+    """Compute the minimum spanning tree of a complete graph, with Prim's algorithm.
+
+    Contrary to the MST helpers of :mod:`sklearn.cluster`, which only need the
+    weights of the edges and report them alongside the order the nodes were
+    visited in, the edges returned here are the actual edges of the tree. This
+    is required to tell the internal nodes from the leaves.
+
+    Parameters
+    ----------
+    distances : ndarray of shape (n_samples, n_samples)
+        Weights of the edges of the complete graph. The diagonal is ignored.
+
+    tie_breaker : ndarray of shape (n_samples, n_samples), default=None
+        Secondary weights, used to choose between edges of equal weight.
+        Mutual reachability distances are full of ties, since every edge
+        around a point lying in a sparse area weighs the core distance of that
+        point: the tree would otherwise depend on the ordering of the samples.
+
+    Returns
+    -------
+    sources, targets : ndarray of shape (n_samples - 1,), dtype=intp
+        The two ends of each edge of the tree.
+
+    weights : ndarray of shape (n_samples - 1,), dtype=float64
+        The weight of each edge of the tree.
+    """
+    n_samples = distances.shape[0]
+    sources = np.zeros(n_samples - 1, dtype=np.intp)
+    targets = np.empty(n_samples - 1, dtype=np.intp)
+    weights = np.empty(n_samples - 1, dtype=np.float64)
+
+    # For each node out of the tree, its closest node in the tree (starting
+    # from a tree made of the first node) and how far away it is. Nodes of
+    # the tree are flagged with an infinite distance.
+    closest_in_tree = np.zeros(n_samples, dtype=np.intp)
+    distance_to_tree = distances[0].astype(np.float64, copy=True)
+    in_tree = np.zeros(n_samples, dtype=bool)
+    in_tree[0] = True
+    distance_to_tree[0] = np.inf
+    if tie_breaker is not None:
+        tie_to_tree = tie_breaker[0].astype(np.float64, copy=True)
+
+    for i in range(n_samples - 1):
+        new_node = np.argmin(distance_to_tree)
+        if tie_breaker is not None:
+            candidates = np.flatnonzero(distance_to_tree == distance_to_tree[new_node])
+            if candidates.shape[0] > 1:
+                new_node = candidates[np.argmin(tie_to_tree[candidates])]
+        sources[i] = closest_in_tree[new_node]
+        targets[i] = new_node
+        weights[i] = distance_to_tree[new_node]
+
+        in_tree[new_node] = True
+        distance_to_tree[new_node] = np.inf
+        closer = distances[new_node] < distance_to_tree
+        if tie_breaker is not None:
+            closer |= (distances[new_node] == distance_to_tree) & (
+                tie_breaker[new_node] < tie_to_tree
+            )
+            closer &= ~in_tree
+            tie_to_tree[closer] = tie_breaker[new_node, closer]
+        else:
+            closer &= ~in_tree
+        distance_to_tree[closer] = distances[new_node, closer]
+        closest_in_tree[closer] = new_node
+
+    return sources, targets, weights
+
+
+def _internal_minimum_spanning_tree(distances, tie_breaker=None):
+    """Compute the density sparseness and the internal nodes of a cluster.
+
+    The minimum spanning tree (MST) of the complete graph weighted by
+    `distances` is built. Its internal nodes are the ones of degree greater
+    than one and its internal edges are the ones joining two internal nodes.
+    The density sparseness of the cluster is the largest weight of the internal
+    edges (Definition 5 of [1]_).
+
+    Parameters
+    ----------
+    distances : ndarray of shape (cluster_size, cluster_size), dtype=float64
+        Pairwise (mutual reachability) distances between the points of the
+        cluster.
+
+    tie_breaker : ndarray of shape (cluster_size, cluster_size), default=None
+        Secondary distances, used to choose between edges of equal weight when
+        building the MST.
+
+    Returns
+    -------
+    internal_nodes : ndarray of shape (n_internal_nodes,)
+        Indices of the internal nodes of the MST. All the nodes are returned
+        when the MST has no internal node, i.e. for a cluster of two points.
+
+    density_sparseness : float
+        Largest weight of the internal edges of the MST.
+    """
+    n_samples = distances.shape[0]
+    sources, targets, weights = _minimum_spanning_tree(distances, tie_breaker)
+
+    is_internal_node = (
+        np.bincount(np.concatenate([sources, targets]), minlength=n_samples) > 1
+    )
+    is_internal_edge = is_internal_node[sources] & is_internal_node[targets]
+
+    if is_internal_edge.any():
+        density_sparseness = weights[is_internal_edge].max()
+    else:
+        # Density sparseness is not defined by the paper when the MST has no
+        # internal edge. Like the MATLAB code of its authors, fall back on the
+        # largest of all the edges.
+        warnings.warn(
+            "The minimum spanning tree has no internal edges: "
+            "falling back on implementation-specific behavior "
+            "by skipping edge selection.",
+            UserWarning,
+        )
+        density_sparseness = weights.max()
+
+    if is_internal_node.any():
+        internal_nodes = np.flatnonzero(is_internal_node)
+    else:
+        # Keeping every node (rather than an arbitrary one) makes the result
+        # independent from the ordering of the samples.
+        internal_nodes = np.arange(n_samples)
+
+    return internal_nodes, float(density_sparseness)

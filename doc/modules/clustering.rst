@@ -2089,6 +2089,109 @@ cluster analysis as follows:
     <https://en.wikipedia.org/wiki/Davies-Bouldin_index>`_.
 
 
+.. _dbcv_index:
+
+DBCV Index
+----------
+
+If the ground truth labels are not known, the Density-Based Clustering
+Validation index (:func:`sklearn.metrics.dbcv_score`) can be used to evaluate
+clusterings made of arbitrarily shaped clusters, possibly along with noise, such
+as the ones found by :class:`~sklearn.cluster.DBSCAN`,
+:class:`~sklearn.cluster.HDBSCAN` or :class:`~sklearn.cluster.OPTICS`.
+
+Rather than comparing distances to centroids, the index compares the lowest
+density found within each cluster with the highest density found between that
+cluster and the other ones. The score ranges from -1 to 1, where a higher score
+relates to clusters that are denser inside than the areas which separate them.
+
+Samples labeled `-1` are considered to be noise. They are left out of the
+clusters, but each cluster only contributes to the score in proportion of its
+share of all the samples, so that discarding samples as noise is penalized.
+
+In normal usage, the DBCV index is applied to the results of a cluster
+analysis as follows:
+
+  >>> from sklearn.datasets import make_moons
+  >>> from sklearn.cluster import HDBSCAN
+  >>> from sklearn.metrics import dbcv_score
+  >>> X, _ = make_moons(n_samples=200, noise=0.05, random_state=0)
+  >>> labels = HDBSCAN().fit_predict(X)
+  >>> score = dbcv_score(X, labels)
+
+.. topic:: Advantages:
+
+  - The index does not rely on centroids: it makes sense for non-convex
+    clusters, for which the Silhouette Coefficient, the Calinski-Harabasz index
+    and the Davies-Bouldin index are misleading.
+  - Noise is taken into account.
+  - The score is bounded between -1 and 1 and can be broken down per cluster
+    (see the `per_cluster_scores` parameter).
+
+.. topic:: Drawbacks:
+
+  - A pairwise distance matrix is computed for each cluster, hence a memory
+    usage that grows quadratically with the size of the largest cluster.
+  - The index is not defined for clusters of a single sample, nor, in its
+    default configuration, for clusters containing duplicated samples.
+  - The core distances depend on the number of features, which has to be
+    provided along with precomputed distances.
+
+.. dropdown:: Mathematical formulation
+
+  For a cluster :math:`C_i` of :math:`n_i` samples lying in a space of
+  :math:`d` dimensions, the *all-points-core-distance* of a sample
+  :math:`o \in C_i` measures (the inverse of) the density around it:
+
+  .. math::
+    a_{pts}coredist(o) = \left(
+    \frac{\sum_{p \in C_i \setminus \{o\}} \left(\frac{1}{dist(o, p)}\right)^d}
+    {n_i - 1} \right)^{-\frac{1}{d}}
+
+  The *mutual reachability distance* between two samples is then defined as:
+
+  .. math::
+    d_{mreach}(o, p) = \max\{a_{pts}coredist(o), a_{pts}coredist(p), dist(o, p)\}
+
+  A minimum spanning tree :math:`MST_i` is built for each cluster out of the
+  mutual reachability distances between its samples. The nodes of degree
+  greater than one are its internal nodes and the edges joining two of them are
+  its internal edges. This leads to:
+
+  - the *density sparseness* :math:`DSC(C_i)` of a cluster, the largest weight
+    of the internal edges of :math:`MST_i`;
+  - the *density separation* :math:`DSPC(C_i, C_j)` of a pair of clusters, the
+    smallest mutual reachability distance between the internal nodes of
+    :math:`MST_i` and the ones of :math:`MST_j`.
+
+  The validity of a cluster is:
+
+  .. math::
+    V_C(C_i) = \frac{\min_{j \neq i} DSPC(C_i, C_j) - DSC(C_i)}
+    {\max\left(\min_{j \neq i} DSPC(C_i, C_j), DSC(C_i)\right)}
+
+  and the DBCV index is the average of the validities of the :math:`k`
+  clusters, weighted by their share of the :math:`n` samples (noise included):
+
+  .. math::
+    DBCV = \sum_{i=1}^{k} \frac{n_i}{n} V_C(C_i)
+
+  Several edges often share the same mutual reachability distance, in which
+  case the minimum spanning tree is not unique. The shortest edges are then
+  preferred, which makes the score independent from the order of the samples.
+
+  With `mst_raw_dist=True`, the distances are used as is instead of the mutual
+  reachability distances.
+
+.. dropdown:: References
+
+  * Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.
+    (2014). `"Density-Based Clustering Validation"
+    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_.
+    In Proceedings of the 2014 SIAM International Conference on Data Mining
+    (pp. 839-847).
+
+
 .. _contingency_matrix:
 
 Contingency Matrix

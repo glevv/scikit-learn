@@ -4,13 +4,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import functools
-from collections import Counter
+import warnings
 from numbers import Integral
 
 import numpy as np
 from scipy.sparse import issparse
 
 from sklearn.externals.array_api_compat import is_numpy_array
+from sklearn.metrics.cluster._dbcv_internals import (
+    _all_points_core_distances,
+    _internal_minimum_spanning_tree,
+    _max_core_to_raw_distance_ratio,
+    _mutual_reachability,
+)
 from sklearn.metrics.pairwise import (
     _VALID_METRICS,
     pairwise_distances,
@@ -27,12 +33,6 @@ from sklearn.utils._array_api import (
     xpx,
 )
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
-
-from ._dbcv_internals import (
-    _density_separation,
-    _distances_between_points,
-    _internal_minimum_spanning_tree,
-)
 
 
 def check_number_of_labels(n_labels, n_samples):
@@ -497,9 +497,8 @@ def davies_bouldin_score(X, labels):
         "X": ["array-like"],
         "labels": ["array-like"],
         "metric": [StrOptions(set(_VALID_METRICS) | {"precomputed"}), callable],
-        "d": [None, int],
+        "d": [Interval(Integral, 1, None, closed="left"), None],
         "per_cluster_scores": ["boolean"],
-        "strict_cluster_size_validation": ["boolean"],
         "mst_raw_dist": ["boolean"],
         "verbose": ["boolean"],
     },
@@ -508,16 +507,15 @@ def davies_bouldin_score(X, labels):
 def dbcv_score(
     X,
     labels,
+    *,
     metric="euclidean",
     d=None,
     per_cluster_scores=False,
-    strict_cluster_size_validation=False,
     mst_raw_dist=False,
     verbose=False,
-    **kwd_args,
+    **kwds,
 ):
-    """
-    Compute the density based cluster validity index for a clustering.
+    """Compute the Density-Based Clustering Validation (DBCV) index.
 
     Contrary to alternative, more widely used unsupervised clustering
     metrics, it does not implicitly assume clusters of spherical shape.
@@ -533,49 +531,53 @@ def dbcv_score(
 
     The best value that can be returned is 1 and the worst value is -1.
 
+    Read more in the :ref:`User Guide <dbcv_index>`.
+
+    .. versionadded:: 1.10
+
     Parameters
     ----------
-    X : array-like (n_samples, n_samples) if metric == "precomputed", or \
-        (n_samples, n_features) otherwise
+    X : array-like of shape (n_samples, n_samples) if metric == "precomputed", \
+            or (n_samples, n_features) otherwise
         An array of pairwise distances between samples, or a feature array.
 
-    labels : array (n_samples)
-        The label array output by the clustering, providing an integral
+    labels : array-like of shape (n_samples,)
+        The label array output by the clustering, providing a
         cluster label to each data point, with -1 for noise points.
 
     metric : str or callable, default='euclidean'
         The metric used to compute distances for the clustering (and
-        to be re-used in computing distances for mr distance). If
-        set to `precomputed` then X is assumed to be the precomputed
-        distance matrix between samples.
+        to be re-used in computing mutual reachability distances). If
+        set to `"precomputed"` then `X` is assumed to be the precomputed
+        distance matrix between samples. See
+        :func:`~sklearn.metrics.pairwise_distances` for the other options.
 
-    d : int or None, default=None
+    d : int, default=None
         The number of features (dimension) of the dataset. This need only
-        be set in the case of metric being set to `precomputed`, where
-        the ambient dimension of the data is unknown to the function.
+        be set in the case of metric being set to `"precomputed"`, where
+        the ambient dimension of the data is unknown to the function. It is
+        not used when `mst_raw_dist=True`.
 
     per_cluster_scores : bool, default=False
         Whether to return the validity index for individual clusters.
         Defaults to False with the function returning a single float
         value for the whole clustering.
 
-    strict_cluster_size_validation : bool, default=False
-        If True, fail fast on cluster sizes for which DBCV is undefined.
-
     mst_raw_dist : bool, default=False
         If True, the MST's are constructed solely via 'raw' distances
         (depending on the given metric, e.g. euclidean distances)
         instead of using mutual reachability distances.
-        Thus setting this parameter to True avoids using 'all-points-core-distances'.
+        Thus setting this parameter to True avoids using
+        'all-points-core-distances'.
 
     verbose : bool, default=False
-        If True additional, informational messages are ommitted via stdout.
+        If True additional, informational messages are emitted via stdout.
         They specifically relate to the subcomponents from which the mutual
         reachability distances emerge.
 
-    **kwd_args :
-        Extra arguments to pass to the distance computation for other
-        metrics, such as minkowski, mahanalobis etc.
+    **kwds : optional keyword parameters
+        Any further parameters are passed directly to the distance function,
+        e.g. `p` for the minkowski metric.
 
     Returns
     -------
@@ -584,103 +586,157 @@ def dbcv_score(
         is a numeric value between -1 and 1, with higher values indicating
         a 'better' clustering.
 
-    labels_to_scores : dictionary
+    labels_to_scores : dict
         The cluster validity index of each individual cluster, retrievable by label.
-        The overall validity index is the weighted average of these values.
-        Only returned if per_cluster_scores is set to True.
+        The overall validity index is the average of these values, weighted by the
+        share of the samples (noise included) each cluster holds.
+        Only returned if `per_cluster_scores` is set to True.
+
+    See Also
+    --------
+    silhouette_score : Compute the mean Silhouette Coefficient of all samples.
+    sklearn.cluster.HDBSCAN : Cluster data using hierarchical density-based
+        clustering.
+
+    Notes
+    -----
+    A pairwise distance matrix is built for every cluster and for every pair
+    of clusters, which makes the memory usage quadratic in the size of the
+    largest cluster.
+
+    DBCV is not defined for clusters made of a single sample, nor, unless
+    `mst_raw_dist=True`, for clusters containing duplicated samples.
+
+    Many edges usually share the same mutual reachability distance, in which
+    case the minimum spanning tree of a cluster is not unique. Such ties are
+    settled in favor of the shortest edges, so that the score does not depend
+    on the order of the samples.
 
     References
     ----------
     .. [1] `Moulavi, D., Jaskowiak, P.A., Campello, R.J., Zimek, A. and Sander, J.,
-    2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
-    <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
+       2014. Density-Based Clustering Validation. In SDM (pp. 839-847).
+       <https://www.dbs.ifi.lmu.de/~zimek/publications/SDM2014/DBCV.pdf>`_
+
+    Examples
+    --------
+    >>> from sklearn.datasets import make_moons
+    >>> from sklearn.cluster import HDBSCAN
+    >>> from sklearn.metrics import dbcv_score
+    >>> X, _ = make_moons(n_samples=200, noise=0.05, random_state=0)
+    >>> labels = HDBSCAN().fit_predict(X)
+    >>> score = dbcv_score(X, labels)
     """
-
+    precomputed = isinstance(metric, str) and metric == "precomputed"
     X, labels = check_X_y(X, labels)
-    if strict_cluster_size_validation:
-        for label, count in Counter(labels).items():
-            if count > 1 or str(label) == "-1":
-                continue
+    n_samples = X.shape[0]
 
-            raise ValueError("DBCV is not defined for clusters of size 1.")
+    if precomputed:
+        if X.shape[0] != X.shape[1]:
+            raise ValueError(
+                "X must be a square distance matrix when metric='precomputed'. "
+                f"Got an array of shape {X.shape} instead."
+            )
+        if d is None and not mst_raw_dist:
+            raise ValueError("If metric is precomputed a d value must be provided!")
+        # Integer distances would not survive the computation of the core
+        # distances.
+        X = X.astype(np.float64, copy=False)
+    else:
+        if d is not None:
+            warnings.warn(
+                'The "d" value you provided is being ignored. '
+                "It's only required for precomputed distances.",
+                UserWarning,
+            )
+        d = X.shape[1]
 
     le = LabelEncoder()
     labels = le.fit_transform(labels)
-    cluster_ids = [i for i in range(len(le.classes_)) if str(le.classes_[i]) != "-1"]
-    check_number_of_labels(len(cluster_ids), len(labels))
-    n_labels = len(le.classes_)
+    classes = le.classes_
+    cluster_sizes = np.bincount(labels)
+    # Noise is not a cluster, it only weighs on the final average.
+    cluster_ids = [i for i in range(len(classes)) if str(classes[i]) != "-1"]
+    n_clusters = len(cluster_ids)
+    check_number_of_labels(n_clusters, n_samples)
 
-    core_distances = {}
-    density_sparseness = {}
-    mst_nodes = {}
-    mst_edges = {}
+    if (cluster_sizes[cluster_ids] < 2).any():
+        raise ValueError("DBCV is not defined for clusters of size 1.")
 
-    density_sep = np.full((n_labels, n_labels), np.inf, dtype=np.float64)
-    labels_to_scores = {}
+    def distances_between(rows, cols):
+        if precomputed:
+            return X[np.ix_(rows, cols)]
+        distances = pairwise_distances(X[rows], X[cols], metric=metric, **kwds)
+        return distances.astype(np.float64, copy=False)
 
-    for cluster_id in cluster_ids:
-        distances_for_mst, core_distances[cluster_id] = _distances_between_points(
-            X,
-            labels,
-            cluster_id,
-            metric,
-            d,
-            no_coredist=mst_raw_dist,
-            print_max_raw_to_coredist_ratio=verbose,
-            **kwd_args,
+    density_sparseness = np.empty(n_clusters)
+    # For each cluster, the indices in `X` of the internal nodes of its MST
+    # along with their core distances.
+    internal_nodes, internal_core_distances = [], []
+
+    for k, cluster_id in enumerate(cluster_ids):
+        members = np.flatnonzero(labels == cluster_id)
+        distances = distances_between(members, members)
+
+        if mst_raw_dist:
+            core_distances = None
+            nodes, density_sparseness[k] = _internal_minimum_spanning_tree(distances)
+        else:
+            core_distances = _all_points_core_distances(distances, d)
+            if verbose:
+                ratio = _max_core_to_raw_distance_ratio(distances, core_distances)
+                print(f"Max raw distance to coredistance ratio: {ratio}")
+            reachability = _mutual_reachability(
+                distances, core_distances, core_distances
+            )
+            # Mutual reachability distances are riddled with ties, which are
+            # settled with the raw distances for the MST not to depend on the
+            # ordering of the samples.
+            nodes, density_sparseness[k] = _internal_minimum_spanning_tree(
+                reachability, tie_breaker=distances
+            )
+            core_distances = core_distances[nodes]
+
+        internal_nodes.append(members[nodes])
+        internal_core_distances.append(core_distances)
+
+    density_separation = np.full((n_clusters, n_clusters), np.inf)
+    for k in range(n_clusters):
+        for m in range(k + 1, n_clusters):
+            distances = distances_between(internal_nodes[k], internal_nodes[m])
+            if not mst_raw_dist:
+                distances = _mutual_reachability(
+                    distances, internal_core_distances[k], internal_core_distances[m]
+                )
+            density_separation[k, m] = density_separation[m, k] = distances.min()
+
+    nearest_cluster = density_separation.argmin(axis=1)
+    min_density_separation = density_separation.min(axis=1)
+
+    if (min_density_separation == 0).any():
+        k = int(np.flatnonzero(min_density_separation == 0)[0])
+        raise ValueError(
+            "Aborting aggregation of scores of subcomponents: "
+            "the density separation between cluster "
+            f"{classes[cluster_ids[k]]} and cluster "
+            f"{classes[cluster_ids[nearest_cluster[k]]]} "
+            "is zero, leading to an overall score which is undefined."
         )
 
-        mst_nodes[cluster_id], mst_edges[cluster_id] = _internal_minimum_spanning_tree(
-            distances_for_mst
-        )
-        density_sparseness[cluster_id] = mst_edges[cluster_id].T[2].max()
+    if verbose:
+        for separation, sparseness in zip(min_density_separation, density_sparseness):
+            print(f"Minimum density separation: {separation:.3f}")
+            print(f"Density sparseness: {sparseness:.3f}")
 
-    for cluster_id in cluster_ids:
-        internal_nodes_i = mst_nodes[cluster_id]
-        for j in cluster_ids[cluster_ids.index(cluster_id) + 1 :]:
-            internal_nodes_j = mst_nodes[j]
-            density_sep[cluster_id, j] = _density_separation(
-                X,
-                labels,
-                cluster_id,
-                j,
-                internal_nodes_i,
-                internal_nodes_j,
-                core_distances[cluster_id],
-                core_distances[j],
-                metric=metric,
-                no_coredist=mst_raw_dist,
-                **kwd_args,
-            )
-            density_sep[j, cluster_id] = density_sep[cluster_id, j]
-
-    result = 0
-
-    for cluster_id in cluster_ids:
-        min_density_sep = density_sep[cluster_id].min()
-        if min_density_sep == 0.0:
-            raise ValueError(
-                "Aborting aggregation of scores of subcomponents: "
-                "the density separation between cluster "
-                f"{le.classes_[cluster_id]} and cluster "
-                f"{le.classes_[density_sep[cluster_id].argmin()]} "
-                "is zero, leading to an overall score which is undefined."
-            )
-
-        labels_to_scores[le.classes_[cluster_id]] = (
-            min_density_sep - density_sparseness[cluster_id]
-        ) / max(min_density_sep, density_sparseness[cluster_id])
-
-        if verbose:
-            print(f"Minimum density separation: {min_density_sep:.3f}")
-            print(f"Density sparseness: {density_sparseness[cluster_id]:.3f}")
-
-        cluster_size = np.sum(labels == cluster_id)
-        result += (cluster_size / float(X.shape[0])) * labels_to_scores[
-            le.classes_[cluster_id]
-        ]
+    scores = (min_density_separation - density_sparseness) / np.maximum(
+        min_density_separation, density_sparseness
+    )
+    validity_index = float(scores @ cluster_sizes[cluster_ids] / n_samples)
 
     if per_cluster_scores:
-        return result, labels_to_scores
-    else:
-        return result
+        labels_to_scores = {
+            classes[cluster_id]: float(score)
+            for cluster_id, score in zip(cluster_ids, scores)
+        }
+        return validity_index, labels_to_scores
+    return validity_index
